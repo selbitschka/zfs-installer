@@ -30,6 +30,14 @@ v_bpool_tweaks=              # array; see defaults below for format
 v_root_password=             # Debian-only
 v_rpool_name=
 v_rpool_tweaks=              # array; see defaults below for format
+v_create_home_set=           # create more datasets
+v_create_var_set=
+v_create_opt_set=
+v_root_set_name=             # dataset names
+v_boot_set_name=
+v_home_set_name=
+v_enc_set_name=              # base dataset to enable encryption
+v_swap_set_name="swap"
 v_pools_raid_type=
 declare -a v_selected_disks  # (/dev/by-id/disk_id, ...)
 v_swap_size=                 # integer
@@ -174,8 +182,16 @@ The procedure can be entirely automated via environment variables:
 - ZFS_RPOOL_NAME
 - ZFS_BPOOL_TWEAKS           : boot pool options to set on creation (defaults to `'$c_default_bpool_tweaks'`)
 - ZFS_RPOOL_TWEAKS           : root pool options to set on creation (defaults to `'$c_default_rpool_tweaks'`)
+- ZFS_BOOT_SET_NAME          : name of boot dataset within boot pool
+- ZFS_ROOT_SET_NAME          : name of root dataset within root pool
+- ZFS_HOME_SET_NAME          : name of home dataset within root pool
+- ZFS_ENCRYPTION_SET_NAME    : name of encrypted dataset as parent of all others in root pool
+- ZFS_HOME_SET               : create dataset for /home
+- ZFS_VAR_SET                : create dataset for /var, /var/lib, /var/log, ...
+- ZFS_OPT_SET                : create dataset for /opt -
 - ZFS_POOLS_RAID_TYPE        : options: blank (striping), `mirror`, `raidz`, `raidz2`, `raidz3`; if unset, it will be asked.
 - ZFS_NO_INFO_MESSAGES       : set 1 to skip informational messages
+- ZFS_NO_USER_WAIT            : set 1 to skip waiting for user confirmation to unmount
 - ZFS_SWAP_SIZE              : swap size (integer); set 0 for no swap
 - ZFS_FREE_TAIL_SPACE        : leave free space at the end of each disk (integer), for example, for a swap partition
 
@@ -628,6 +644,106 @@ The option `-O devices=off` is already set, and must not be specified.'
   print_variables v_bpool_tweaks v_rpool_tweaks
 }
 
+function ask_dataset_names {
+  print_step_info_header
+
+  local passphrase
+  local encprefix=""
+
+  set +x
+  passphrase=$(cat "$c_passphrase_named_pipe")
+  if [[ -n $passphrase ]]; then
+    if [[ "${ZFS_ENCRYPTION_SET_NAME:-}" != "" ]]; then
+      v_enc_set_name=$ZFS_ENCRYPTION_SET_NAME
+    else
+      local eset_name_invalid_message=
+
+      while [[ ! $v_enc_set_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
+        v_enc_set_name=$(whiptail --inputbox "${eset_name_invalid_message}Insert the name for the 'encryption' parent dataset in your root pool." 30 100 encrypted 3>&1 1>&2 2>&3)
+
+        eset_name_invalid_message="Invalid pool name! "
+      done
+    fi
+    encprefix="$v_enc_set_name/"
+    echo -n "$passphrase" > "$c_passphrase_named_pipe" &
+  fi
+  set -x
+
+  if [[ "${ZFS_BOOT_SET_NAME:-}" != "" ]]; then
+    v_boot_set_name=$ZFS_BOOT_SET_NAME
+  else
+    local bset_name_invalid_message=
+
+    while [[ ! $v_boot_set_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
+      v_boot_set_name=$(whiptail --inputbox "${bset_name_invalid_message}Insert the name for the 'boot' dataset on $v_bpool_name pool" 30 100 boot 3>&1 1>&2 2>&3)
+
+      bset_name_invalid_message="Invalid pool name! "
+    done
+  fi
+
+  if [[ "${ZFS_ROOT_SET_NAME:-}" != "" ]]; then
+    v_root_set_name=$ZFS_ROOT_SET_NAME
+  else
+    local rset_name_invalid_message=
+
+    while [[ ! $v_root_set_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
+      v_root_set_name=$(whiptail --inputbox "${rset_name_invalid_message}Insert the name for the 'root' dataset on $v_rpool_name pool" 30 100 root 3>&1 1>&2 2>&3)
+
+      rset_name_invalid_message="Invalid pool name! "
+    done
+  fi
+  v_root_set_name="${encprefix}${v_root_set_name}"
+
+  if [[ "${ZFS_HOME_SET:-}" != "" ]]; then
+    v_create_home_set=true
+  else
+    if (whiptail --title "'home' dataset" --yesno "Create separate 'home' dataset?" 8 78); then
+      v_create_home_set=true
+    else
+      v_create_home_set=false
+    fi
+  fi
+
+  if [[ "$v_create_home_set" == "true" ]]; then
+    if [[ "${ZFS_HOME_SET_NAME:-}" != "" ]]; then
+      v_home_set_name=$ZFS_HOME_SET_NAME
+    else
+      local hset_name_invalid_message=
+
+      while [[ ! $v_home_set_name =~ ^[a-z][a-zA-Z_:.-]+$ ]]; do
+        v_home_set_name=$(whiptail --inputbox "${hset_name_invalid_message}Insert the name for the 'home' dataset on $v_rpool_name pool" 30 100 home 3>&1 1>&2 2>&3)
+
+        hset_name_invalid_message="Invalid pool name! "
+      done
+    fi
+    v_home_set_name="${encprefix}${v_home_set_name}"
+  fi
+
+  if [[ "${ZFS_VAR_SET:-}" != "" ]]; then
+    v_create_var_set=true
+  else
+    if (whiptail --title "'var' dataset" --yesno "Create separate 'var' datasets (/var/log/, /var/tmp, /var/lib/, ...)?" 8 78); then
+      v_create_var_set=true
+    else
+      v_create_var_set=false
+    fi
+  fi
+
+  if [[ "${ZFS_OPT_SET:-}" != "" ]]; then
+    v_create_opt_set=true
+  else
+    if (whiptail --title "'opt' dataset" --yesno "Create separate 'opt' dataset?" 8 78); then
+      v_create_opt_set=true
+    else
+      v_create_opt_set=false
+    fi
+  fi
+
+  v_swap_set_name="${encprefix}${v_swap_set_name}"
+
+  print_variables v_enc_set_name v_root_set_name v_boot_set_name v_create_home_set v_home_set_name v_create_var_set v_create_opt_set v_swap_set_name
+}
+
 function install_host_packages {
   print_step_info_header
 
@@ -950,7 +1066,7 @@ function create_pools {
   passphrase=$(cat "$c_passphrase_named_pipe")
 
   if [[ -n $passphrase ]]; then
-    encryption_options=(-O "encryption=on" -O "keylocation=prompt" -O "keyformat=passphrase")
+    encryption_options=(-o "encryption=aes-256-gcm" -o "keylocation=prompt" -o "keyformat=passphrase")
   fi
 
   # Push back for unlogged reuse. Minor inconvenience, but worth :-)
@@ -975,31 +1091,102 @@ function create_pools {
   # Stdin is ignored if the encryption is not set (and set via prompt).
   #
   # shellcheck disable=SC2086 # TODO: convert v_pools_raid_type to array, and quote
+  echo "creating root pool $v_rpool_name"
   zpool create \
-    "${encryption_options[@]}" \
     "${v_rpool_tweaks[@]}" \
-    -O devices=off -O mountpoint=/ -R "$c_zfs_mount_dir" -f \
-    "$v_rpool_name" $v_pools_raid_type "${rpool_disks_partitions[@]}" \
-    < "$c_passphrase_named_pipe"
+    -O devices=off -O mountpoint=/ -O canmount=off -R "$c_zfs_mount_dir" -f \
+    "$v_rpool_name" $v_pools_raid_type "${rpool_disks_partitions[@]}"
 
   # `-d` disable all the pool features (not used here);
   #
   # shellcheck disable=SC2086 # TODO: See above
+  echo "creating boot pool $v_bpool_name"
   zpool create \
     "${v_bpool_tweaks[@]}" \
-    -O devices=off -O mountpoint=/boot -R "$c_zfs_mount_dir" -f \
+    -O devices=off -O mountpoint=/ -O canmount=off -R "$c_zfs_mount_dir" -f \
     "$v_bpool_name" $v_pools_raid_type "${bpool_disks_partitions[@]}"
+
+  # if encryption is enabled we create 'enc' dataset for all encrypted children
+  if [[ -n $passphrase ]]; then
+    echo "creating 'enc' dataset $v_rpool_name/$v_enc_set_name"
+    zfs create \
+      "${encryption_options[@]}" \
+      -o canmount=off \
+      -o mountpoint=none \
+      "$v_rpool_name/$v_enc_set_name" \
+      < "$c_passphrase_named_pipe"
+  fi
+
+  # create (encrypted) root dataset
+  echo "creating 'root' dataset $v_rpool_name/$v_root_set_name"
+  zfs create \
+    -o mountpoint=/ \
+    "$v_rpool_name/$v_root_set_name"
+
+  # create boot dataset (needs to be after root dataset because of automount)
+  echo "creating 'boot' dataset $v_bpool_name/$v_boot_set_name"
+  zfs create \
+    -o mountpoint=/boot \
+    "$v_bpool_name/$v_boot_set_name"
+
+  # create home dataset
+  if [[ "$v_create_home_set" == "true" ]]; then
+    echo "creating 'home' dataset $v_rpool_name/$v_home_set_name"
+    zfs create \
+      -o mountpoint=/home \
+      "$v_rpool_name/$v_home_set_name"
+  fi
+
+  # create var datasets
+  if [[ "$v_create_var_set" == "true" ]]; then
+    echo "creating var datasets $v_rpool_name/$v_root_set_name/var ..."
+    zfs create \
+      -o canmount=off \
+      "$v_rpool_name/$v_root_set_name/var"
+
+    zfs create \
+      -o canmount=off \
+      "$v_rpool_name/$v_root_set_name/var/lib"
+
+    zfs create \
+      "$v_rpool_name/$v_root_set_name/var/log"
+
+    zfs create \
+      -o com.sun:auto-snapshot=false \
+      "$v_rpool_name/$v_root_set_name/var/cache"
+
+    zfs create \
+      -o com.sun:auto-snapshot=false \
+      "$v_rpool_name/$v_root_set_name/var/tmp"
+
+    chmod 1777 "$c_zfs_mount_dir/var/tmp"
+  fi
+
+  if [[ "$v_create_opt_set" == "true" ]]; then
+    echo "creating opt dataset $v_rpool_name/$v_root_set_name/opt"
+    zfs create \
+      "$v_rpool_name/$v_root_set_name/opt"
+  fi
+
 }
+
 
 function create_swap_volume {
   if [[ $v_swap_size -gt 0 ]]; then
+    echo "creating swap dataset $v_rpool_name/$v_swap_set_name ..."
     zfs create \
       -V "${v_swap_size}G" -b "$(getconf PAGESIZE)" \
       -o compression=zle -o logbias=throughput -o sync=always -o primarycache=metadata -o secondarycache=none -o com.sun:auto-snapshot=false \
-      "$v_rpool_name/swap"
+      "$v_rpool_name/$v_swap_set_name"
 
-    mkswap -f "/dev/zvol/$v_rpool_name/swap"
+    sleep "$v_swap_size"
+    mkswap -f "/dev/zvol/$v_rpool_name/$v_swap_set_name"
   fi
+}
+
+function show_datasets {
+  zpool list
+  zfs list -o name,mountpoint,canmount,mounted,encryption
 }
 
 function sync_os_temp_installation_dir_to_rpool {
@@ -1139,7 +1326,9 @@ function install_and_configure_bootloader {
 
   chroot_execute "grub-install"
 
-  chroot_execute "perl -i -pe 's/(GRUB_CMDLINE_LINUX=\")/\${1}root=ZFS=$v_rpool_name /'    /etc/default/grub"
+  local root_path="$v_rpool_name/$v_root_set_name"
+  local escaped_root_path=${root_path//\//\\/}
+  chroot_execute "perl -i -pe 's/(GRUB_CMDLINE_LINUX=\")/\${1}root=ZFS=$escaped_root_path /'    /etc/default/grub"
 
   # Silence warning during the grub probe (source: https://git.io/JenXF).
   #
@@ -1174,7 +1363,9 @@ function install_and_configure_bootloader_Debian {
 
   chroot_execute "grub-install"
 
-  chroot_execute "perl -i -pe 's/(GRUB_CMDLINE_LINUX=\")/\${1}root=ZFS=$v_rpool_name /' /etc/default/grub"
+  local root_path="$v_rpool_name/$v_root_set_name"
+  local escaped_root_path=${root_path//\//\\/}
+  chroot_execute "perl -i -pe 's/(GRUB_CMDLINE_LINUX=\")/\${1}root=ZFS=$escaped_root_path /' /etc/default/grub"
   chroot_execute "perl -i -pe 's/(GRUB_CMDLINE_LINUX_DEFAULT=.*)quiet/\$1/'             /etc/default/grub"
   chroot_execute "perl -i -pe 's/#(GRUB_TERMINAL=console)/\$1/'                         /etc/default/grub"
 
@@ -1224,8 +1415,8 @@ UNIT"
 
   chroot_execute "systemctl enable zfs-import-$v_bpool_name.service"
 
-  chroot_execute "zfs set mountpoint=legacy $v_bpool_name"
-  chroot_execute "echo $v_bpool_name /boot zfs nodev,relatime,x-systemd.requires=zfs-import-$v_bpool_name.service 0 0 >> /etc/fstab"
+  chroot_execute "zfs set mountpoint=legacy $v_bpool_name/$v_boot_set_name"
+  chroot_execute "echo $v_bpool_name/$v_boot_set_name /boot zfs nodev,relatime,x-systemd.requires=zfs-import-$v_bpool_name.service 0 0 >> /etc/fstab"
 }
 
 function update_zed_cache_Debian {
@@ -1247,7 +1438,7 @@ function update_zed_cache_Debian {
   if [[ ! -s "$c_zfs_mount_dir/etc/zfs/zfs-list.cache/$v_rpool_name" ]]; then
     # Takes around half second on a test VM.
     #
-    chroot_execute "zfs set canmount=noauto $v_rpool_name"
+    chroot_execute "zfs set canmount=noauto $v_rpool_name/$v_root_set_name"
 
     SECONDS=0
 
@@ -1313,8 +1504,19 @@ TIMER"
 function configure_remaining_settings {
   print_step_info_header
 
-  [[ $v_swap_size -gt 0 ]] && chroot_execute "echo /dev/zvol/$v_rpool_name/swap none swap discard 0 0 >> /etc/fstab" || true
+  [[ $v_swap_size -gt 0 ]] && chroot_execute "echo /dev/zvol/$v_rpool_name/$v_swap_set_name none swap discard 0 0 >> /etc/fstab" || true
   chroot_execute "echo RESUME=none > /etc/initramfs-tools/conf.d/resume"
+}
+
+function wait_for_user {
+  print_step_info_header
+  local dialog_message="Installation is almost finished. You can now copy your user files to $c_zfs_mount_dir/home or make other changes to your new system mounted at $c_zfs_mount_dir.
+
+After you are finished press 'OK' to finish the setup."
+
+  if [[ ${ZFS_NO_USER_WAIT:-} == "" ]]; then
+    whiptail --msgbox "$dialog_message" 30 100
+  fi
 }
 
 function prepare_for_system_exit {
@@ -1387,6 +1589,7 @@ ask_swap_size
 ask_free_tail_space
 ask_pool_names
 ask_pool_tweaks
+ask_dataset_names
 
 distro_dependent_invoke "install_host_packages"
 setup_partitions
@@ -1397,11 +1600,14 @@ if [[ "${ZFS_OS_INSTALLATION_SCRIPT:-}" == "" ]]; then
 
   create_pools
   create_swap_volume
+  show_datasets
+
   sync_os_temp_installation_dir_to_rpool
   remove_temp_partition_and_expand_rpool
 else
   create_pools
   create_swap_volume
+  show_datasets
   remove_temp_partition_and_expand_rpool
 
   custom_install_operating_system
@@ -1415,6 +1621,6 @@ configure_boot_pool_import
 distro_dependent_invoke "update_zed_cache" --noforce
 configure_pools_trimming
 configure_remaining_settings
-
+wait_for_user
 prepare_for_system_exit
 display_exit_banner
